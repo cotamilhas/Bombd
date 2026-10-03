@@ -91,7 +91,8 @@ public class SimServer
         {
             if (IsKarting)
                 _votePackage = CreateSystemSyncObject(new VotePackage(), NetObjectType.VotePackage);
-            _gameroomState = CreateSystemSyncObject(new GameroomState(Platform), NetObjectType.GameroomState);
+            var gameroomState = new GameroomState(Platform) { IsLeaderVetoAvailable = IsModNation && !isRanked }; // Not sure if karting had this, so playing it safe
+            _gameroomState = CreateSystemSyncObject(gameroomState, NetObjectType.GameroomState);
             _spectatorInfo = CreateSystemSyncObject(new SpectatorInfo(Platform), NetObjectType.SpectatorInfo);
             _aiInfo = CreateSystemSyncObject(new AiInfo(Platform), NetObjectType.AiInfo);
             _startingGrid = CreateSystemSyncObject(new StartingGrid(Platform), NetObjectType.StartingGrid);
@@ -471,7 +472,8 @@ public class SimServer
                 break;
             }
         }
-        
+        // long logging to find why xp races behave weird with their timer
+        Logger.LogInfo<SimServer>($"GameroomState {oldState} -> {state}: start in {(room.LoadEventTime - TimeHelper.LocalTime) / 1000.0:0.0}s, timerLock={room.LockedTimerValue}, racerLock={room.LockedForRacerJoinsValue}, players={_players.Count}, ready={_players.Count(p => (p.State.Flags & PlayerStateFlags.GameRoomReady) != 0)}");
         _gameroomState.Sync();
     }
     
@@ -1246,6 +1248,13 @@ public class SimServer
                     player.Disconnect();
                     break;
                 }
+
+                foreach (var result in results)
+                {
+                    if (result.UnknownAttributes == null) continue;
+                    foreach (var attr in result.UnknownAttributes)
+                    Logger.LogInfo<SimServer>($"Unmapped EventResult attribute from {player.Username}: {attr.Name}={attr.Value}");
+                }
                 
                 // bool isValid = true;
                 // foreach (var result in results)
@@ -1468,6 +1477,12 @@ public class SimServer
 
                 // Patch our existing player state with the new message
                 player.State.Update(state);
+                // Adding logging to pick up attributes
+                if (state.UnknownAttributes != null)
+                {
+                    foreach (var attr in state.UnknownAttributes)
+                    Logger.LogInfo<SimServer>($"Unmapped PlayerState attribute from {player.Username}: {attr.Name}={attr.Value}");
+                }
                 
                 // If we're not in a gameroom, there's no GameroomReady event, so wait until we've received
                 // the player config and the second player state update to finish our "connecting" process.
@@ -1933,6 +1948,12 @@ public class SimServer
                                         {
                                             nextSettings = Career.ModNation.GetRankedEvent(Owner, _raceSettings.Value.CreationId);
                                         }
+
+                                        // trying to reset vetos so that they dont carry over per lobby (intended?)
+                                        foreach (var p in _players)
+                                        p.State.HasEventVetoed = false;
+                                        _gameroomState.Value.HasEventVetoOccured = false;
+                                        _gameroomState.Sync();
 
                                         TriggerRaceEventSync(EventUpdateReason.RaceSettingsChanged, nextSettings);
                                         Room.UpdateAttributes(nextSettings);
