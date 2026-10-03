@@ -1650,12 +1650,12 @@ public class SimServer
             {
                 BestDrift = result.BestDrift,
                 BestHangTime = result.BestHangTime,
-                Finished = player.HasFinishedRace,
+                Finished = player.HasFinishedRace && (!IsModNation || (result.EventScore > 0 && result.BestEventSubScore > 0)),
                 PlayerConnectId = player.State.PlayerConnectId,
                 Rank = rank,
                 BestLapTime = result.BestEventSubScore,
                 FinishTime = result.EventScore,
-                PlaygroupSize = result.PlayerGroupId != 0 ? _eventResults.Count(match => match.PlayerGroupId == result.PlayerGroupId) : 1,
+                PlaygroupSize = IsModNation ? 0 : (result.PlayerGroupId != 0 ? _eventResults.Count(match => match.PlayerGroupId == result.PlayerGroupId) : 1),
                 Points = result.PointsScored
             });
         }
