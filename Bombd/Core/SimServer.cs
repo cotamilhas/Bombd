@@ -1665,7 +1665,7 @@ public class SimServer
             {
                 BestDrift = result.BestDrift,
                 BestHangTime = result.BestHangTime,
-                Finished = player.HasFinishedRace && (!IsModNation || (result.EventScore > 0 && result.BestEventSubScore > 0)),
+                Finished = player.HasFinishedRace,
                 PlayerConnectId = player.State.PlayerConnectId,
                 Rank = rank,
                 BestLapTime = result.BestEventSubScore,
