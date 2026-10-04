@@ -1700,12 +1700,15 @@ public class SimServer
                 break;
         }
 
+         foreach (var s in stats) // More logging to troubleshoot times not saving
+        Logger.LogInfo<SimServer>($"Race result on track {_raceSettings.Value.CreationId}: pcId={s.PlayerConnectId}, finished={s.Finished}, lap={s.BestLapTime}, finish={s.FinishTime}");
+
         BombdServer.Comms.NotifyEventFinished(_raceSettings.Value.CreationId, stats, IsModNation, gameType, IsRanked);
         
         string xml = EventResult.Serialize(_eventResults);
         _eventResults.Clear();
 
-        Logger.LogDebug<SimServer>("Finishing event with XML:\n" + xml);
+        Logger.LogDebug<SimServer>($"Finishing event on track {_raceSettings.Value.CreationId} with XML:\n" + xml);
 
         return xml;
     }
