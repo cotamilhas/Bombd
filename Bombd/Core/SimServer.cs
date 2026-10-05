@@ -42,6 +42,8 @@ public class SimServer
     private readonly NetArbitrationServer _arbitrationServer;
   
     private readonly HashSet<int> _leaderVetoes = new();
+    private DateTime _lastOwnerChange = DateTime.MinValue;
+    private static readonly TimeSpan LeaderVetoCooldown = TimeSpan.FromSeconds(30);
     
     private readonly Dictionary<int, SyncObject> _syncObjects = new();
     private int _seed = CryptoHelper.GetRandomSecret();
@@ -131,16 +133,35 @@ public class SimServer
     private void ChangeOwner(int newOwner)
     {
         Owner = newOwner;
+        _lastOwnerChange = DateTime.UtcNow;
         _leaderVetoes.Clear(); // votes were against the old host
+        Logger.LogInfo<SimServer>($"Host changed to {newOwner}");
+
+        // Hide the leader veto for the cooldown, so hosting can't bounce back and forth
+        if (IsModNation && !IsRanked && _gameroomState != null)
+        {
+            _gameroomState.Value.IsLeaderVetoAvailable = false;
+            _gameroomState.Sync();
+        }
 
         if (_raceSettings == null) return;
-            _raceSettings.Value.OwnerNetcodeUserId = Owner;
+        _raceSettings.Value.OwnerNetcodeUserId = Owner;
         if (_seriesInfo != null)
         {
             foreach (var evt in _seriesInfo.Value.Events)
                 evt.OwnerNetcodeUserId = Owner;
         }
         TriggerRaceEventSync(EventUpdateReason.HostChanged);
+    }
+
+    private bool LeaderVetoAllowedNow(GameroomState room)
+    {
+        if (!IsModNation || IsRanked || Type != ServerType.Competitive) return false;
+        if (DateTime.UtcNow - _lastOwnerChange < LeaderVetoCooldown) return false;
+        if (room.State <= RoomState.Ready) return true;
+        if (room.State == RoomState.CountingDown)
+            return room.LoadEventTime - TimeHelper.LocalTime > _raceConstants.GameRoomTimerRacerLock;
+        return false;
     }
 
     private void SwitchAllToRacers()
@@ -401,6 +422,12 @@ public class SimServer
         var room = _gameroomState.Value;
         var oldState = room.State;
         if (state == oldState) return;
+
+        if (IsModNation && !IsRanked && state > RoomState.Ready && state != RoomState.CountingDown)
+        {
+            room.IsLeaderVetoAvailable = false;
+            _leaderVetoes.Clear();
+        }
         
         Logger.LogDebug<SimServer>($"Setting GameRoomState to {state}");
 
@@ -1191,7 +1218,8 @@ public class SimServer
             }
             case NetMessageType.GameroomLeaderVeto:
             {
-                if (!IsModNation || IsRanked || Type != ServerType.Competitive || _raceSettings == null) break;
+                if (Type != ServerType.Competitive || _raceSettings == null || !LeaderVetoAllowedNow(_gameroomState.Value)) break;   // <- changed
+
                 if (player.UserId == Owner || !_leaderVetoes.Add(player.UserId)) break;
 
                 Broadcast((int)player.State.NameUid, NetMessageType.GameroomLeaderVeto);
@@ -1199,6 +1227,9 @@ public class SimServer
                 var voters = _players.Where(p => p.UserId != Owner).ToList();
                 if (voters.Count > 0 && voters.All(p => _leaderVetoes.Contains(p.UserId)))
                 {
+                    if (_gameroomState.Value.State == RoomState.CountingDown)
+                        SetCurrentGameroomState(RoomState.Ready);
+
                     var newOwner = voters[Random.Shared.Next(voters.Count)];
                     Logger.LogInfo<SimServer>($"Leader veto passed, host changed to {newOwner.Username}");
                     ChangeOwner(newOwner.UserId);
@@ -1780,6 +1811,20 @@ public class SimServer
                 SetCurrentGameroomState(RoomState.WaitingMinPlayers);
         }
         
+        if (IsModNation && !IsRanked && Type == ServerType.Competitive)
+        {
+            bool vetoAllowed = LeaderVetoAllowedNow(room);
+            if (room.IsLeaderVetoAvailable != vetoAllowed)
+            {
+                room.IsLeaderVetoAvailable = vetoAllowed;
+                if (!vetoAllowed) _leaderVetoes.Clear(); // I think original servers cleared this too?
+                _gameroomState.Sync();
+            }
+        }
+        
+        switch (room.State)
+        {
+
         switch (room.State)
         {
             case RoomState.CountingDown:
