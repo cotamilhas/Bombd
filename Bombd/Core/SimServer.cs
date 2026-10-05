@@ -1824,9 +1824,6 @@ public class SimServer
         
         switch (room.State)
         {
-
-        switch (room.State)
-        {
             case RoomState.CountingDown:
             {
                 // I think the countdown should only pause for connecting people in ranked races?
