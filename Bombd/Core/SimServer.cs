@@ -40,6 +40,8 @@ public class SimServer
     private readonly List<PlayerState> _playerStates = [];
     private readonly Dictionary<int, GamePlayer> _playerLookup = new();
     private readonly NetArbitrationServer _arbitrationServer;
+  
+    private readonly HashSet<int> _leaderVetoes = new();
     
     private readonly Dictionary<int, SyncObject> _syncObjects = new();
     private int _seed = CryptoHelper.GetRandomSecret();
@@ -124,6 +126,21 @@ public class SimServer
         var state = player.State;
         if (Type != ServerType.Competitive) return !state.IsConnecting;
         return !state.IsConnecting && (state.Flags & PlayerStateFlags.GameRoomReady) != 0;
+    }
+
+    private void ChangeOwner(int newOwner)
+    {
+        Owner = newOwner;
+        _leaderVetoes.Clear(); // votes were against the old host
+
+        if (_raceSettings == null) return;
+            _raceSettings.Value.OwnerNetcodeUserId = Owner;
+        if (_seriesInfo != null)
+        {
+            foreach (var evt in _seriesInfo.Value.Events)
+                evt.OwnerNetcodeUserId = Owner;
+        }
+        TriggerRaceEventSync(EventUpdateReason.HostChanged);
     }
 
     private void SwitchAllToRacers()
@@ -243,6 +260,8 @@ public class SimServer
                 UpdateRaceSetup();
         }
         
+        _leaderVetoes.Remove(player.UserId);
+
         if (_players.Count == 0) return;
         
         // Make sure to re-order the pod if necessary
@@ -257,21 +276,8 @@ public class SimServer
         // If we're the owner, change the host to someone random
         if (player.UserId == Owner)
         {
-            var random = new Random();
-            int index = random.Next(0, _players.Count);
-            var randomPlayer = _players[index];
-
-            Owner = randomPlayer.UserId;
-            if (_raceSettings != null)
-            {
-                _raceSettings.Value.OwnerNetcodeUserId = Owner;
-                TriggerRaceEventSync(EventUpdateReason.HostChanged);
-                if (_seriesInfo != null)
-                {
-                    foreach (var evt in _seriesInfo.Value.Events)
-                        evt.OwnerNetcodeUserId = Owner;
-                }
-            }
+            var randomPlayer = _players[Random.Shared.Next(_players.Count)];
+            ChangeOwner(randomPlayer.UserId);
         }
     }
 
@@ -1066,9 +1072,7 @@ public class SimServer
                 GamePlayer? target = _players.FirstOrDefault(target => target.State.NameUid == request.Target);
                 if (target != null)
                 {
-                    _raceSettings.Value.OwnerNetcodeUserId = target.UserId;
-                    Owner = target.UserId;
-                    TriggerRaceEventSync(EventUpdateReason.HostChanged);
+                    ChangeOwner(target.UserId);
                 }
                 
                 break;
@@ -1183,6 +1187,22 @@ public class SimServer
                 }
                 
                 Broadcast((int)player.State.NameUid, NetMessageType.RankedEventVeto);
+                break;
+            }
+            case NetMessageType.GameroomLeaderVeto:
+            {
+                if (!IsModNation || IsRanked || Type != ServerType.Competitive || _raceSettings == null) break;
+                if (player.UserId == Owner || !_leaderVetoes.Add(player.UserId)) break;
+
+                Broadcast((int)player.State.NameUid, NetMessageType.GameroomLeaderVeto);
+
+                var voters = _players.Where(p => p.UserId != Owner).ToList();
+                if (voters.Count > 0 && voters.All(p => _leaderVetoes.Contains(p.UserId)))
+                {
+                    var newOwner = voters[Random.Shared.Next(voters.Count)];
+                    Logger.LogInfo<SimServer>($"Leader veto passed, host changed to {newOwner.Username}");
+                    ChangeOwner(newOwner.UserId);
+                }
                 break;
             }
             case NetMessageType.SpectatorInfo:
