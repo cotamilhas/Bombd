@@ -40,6 +40,10 @@ public class SimServer
     private readonly List<PlayerState> _playerStates = [];
     private readonly Dictionary<int, GamePlayer> _playerLookup = new();
     private readonly NetArbitrationServer _arbitrationServer;
+  
+    private readonly HashSet<int> _leaderVetoes = new();
+    private DateTime _lastOwnerChange = DateTime.MinValue;
+    private static readonly TimeSpan LeaderVetoCooldown = TimeSpan.FromSeconds(30);
     
     private readonly Dictionary<int, SyncObject> _syncObjects = new();
     private int _seed = CryptoHelper.GetRandomSecret();
@@ -50,6 +54,8 @@ public class SimServer
     private int _raceStateEndTime;
     private float _pausedTimeRemaining;
     private string _destination = Destination.GameRoom;
+
+    private readonly Dictionary<int, int> _gridOrder = new();
     
     private GenericSyncObject<CoiInfo>? _coiInfo;
     private GenericSyncObject<VotePackage> _votePackage;
@@ -89,7 +95,8 @@ public class SimServer
         {
             if (IsKarting)
                 _votePackage = CreateSystemSyncObject(new VotePackage(), NetObjectType.VotePackage);
-            _gameroomState = CreateSystemSyncObject(new GameroomState(Platform), NetObjectType.GameroomState);
+            var gameroomState = new GameroomState(Platform) { IsLeaderVetoAvailable = IsModNation && !isRanked }; // Not sure if karting had this, so playing it safe
+            _gameroomState = CreateSystemSyncObject(gameroomState, NetObjectType.GameroomState);
             _spectatorInfo = CreateSystemSyncObject(new SpectatorInfo(Platform), NetObjectType.SpectatorInfo);
             _aiInfo = CreateSystemSyncObject(new AiInfo(Platform), NetObjectType.AiInfo);
             _startingGrid = CreateSystemSyncObject(new StartingGrid(Platform), NetObjectType.StartingGrid);
@@ -121,6 +128,40 @@ public class SimServer
         var state = player.State;
         if (Type != ServerType.Competitive) return !state.IsConnecting;
         return !state.IsConnecting && (state.Flags & PlayerStateFlags.GameRoomReady) != 0;
+    }
+
+    private void ChangeOwner(int newOwner)
+    {
+        Owner = newOwner;
+        _lastOwnerChange = DateTime.UtcNow;
+        _leaderVetoes.Clear(); // votes were against the old host
+        Logger.LogInfo<SimServer>($"Host changed to {newOwner}");
+
+        // Hide the leader veto for the cooldown, so hosting can't bounce back and forth
+        if (IsModNation && !IsRanked && _gameroomState != null)
+        {
+            _gameroomState.Value.IsLeaderVetoAvailable = false;
+            _gameroomState.Sync();
+        }
+
+        if (_raceSettings == null) return;
+        _raceSettings.Value.OwnerNetcodeUserId = Owner;
+        if (_seriesInfo != null)
+        {
+            foreach (var evt in _seriesInfo.Value.Events)
+                evt.OwnerNetcodeUserId = Owner;
+        }
+        TriggerRaceEventSync(EventUpdateReason.HostChanged);
+    }
+
+    private bool LeaderVetoAllowedNow(GameroomState room)
+    {
+        if (!IsModNation || IsRanked || Type != ServerType.Competitive) return false;
+        if (DateTime.UtcNow - _lastOwnerChange < LeaderVetoCooldown) return false;
+        if (room.State <= RoomState.Ready) return true;
+        if (room.State == RoomState.CountingDown)
+            return room.LoadEventTime - TimeHelper.LocalTime > _raceConstants.GameRoomTimerRacerLock;
+        return false;
     }
 
     private void SwitchAllToRacers()
@@ -240,6 +281,8 @@ public class SimServer
                 UpdateRaceSetup();
         }
         
+        _leaderVetoes.Remove(player.UserId);
+
         if (_players.Count == 0) return;
         
         // Make sure to re-order the pod if necessary
@@ -254,21 +297,8 @@ public class SimServer
         // If we're the owner, change the host to someone random
         if (player.UserId == Owner)
         {
-            var random = new Random();
-            int index = random.Next(0, _players.Count);
-            var randomPlayer = _players[index];
-
-            Owner = randomPlayer.UserId;
-            if (_raceSettings != null)
-            {
-                _raceSettings.Value.OwnerNetcodeUserId = Owner;
-                TriggerRaceEventSync(EventUpdateReason.HostChanged);
-                if (_seriesInfo != null)
-                {
-                    foreach (var evt in _seriesInfo.Value.Events)
-                        evt.OwnerNetcodeUserId = Owner;
-                }
-            }
+            var randomPlayer = _players[Random.Shared.Next(_players.Count)];
+            ChangeOwner(randomPlayer.UserId);
         }
     }
 
@@ -392,6 +422,12 @@ public class SimServer
         var room = _gameroomState.Value;
         var oldState = room.State;
         if (state == oldState) return;
+
+        if (IsModNation && !IsRanked && state > RoomState.Ready && state != RoomState.CountingDown)
+        {
+            room.IsLeaderVetoAvailable = false;
+            _leaderVetoes.Clear();
+        }
         
         Logger.LogDebug<SimServer>($"Setting GameRoomState to {state}");
 
@@ -420,6 +456,8 @@ public class SimServer
             { 
                 BroadcastPlayerState();
                 SwitchAllToRacers();
+                if (_raceSettings != null)
+                    Room.UpdateAttributes(_raceSettings.Value);
                 break;
             }
             case RoomState.RaceInProgress:
@@ -427,6 +465,8 @@ public class SimServer
                 StartEvent();
                 BroadcastSessionInfo();
                 BroadcastPlayerState();
+                if (_raceSettings != null)
+                    Room.UpdateAttributes(_raceSettings.Value);
                 break;
             }
             case RoomState.Ready:
@@ -443,6 +483,10 @@ public class SimServer
             }
             case RoomState.CountingDown:
             {
+                // This just makes sure we re-roll the grid positions unless the count down gets paused
+                if (oldState != RoomState.CountingDownPaused)
+                _gridOrder.Clear();
+
                 UpdateRaceSetup();
                 
                 room.LoadEventTime = TimeHelper.LocalTime + _raceConstants.GameRoomCountdownTime;
@@ -461,7 +505,8 @@ public class SimServer
                 break;
             }
         }
-        
+        // long logging to find why xp races behave weird with their timer
+        Logger.LogInfo<SimServer>($"GameroomState {oldState} -> {state}: start in {(room.LoadEventTime - TimeHelper.LocalTime) / 1000.0:0.0}s, timerLock={room.LockedTimerValue}, racerLock={room.LockedForRacerJoinsValue}, players={_players.Count}, ready={_players.Count(p => (p.State.Flags & PlayerStateFlags.GameRoomReady) != 0)}");
         _gameroomState.Sync();
     }
     
@@ -495,17 +540,31 @@ public class SimServer
         return syncObject;
     }
 
+    private int GetGridOrder(int userId)
+    {
+    if (!_gridOrder.TryGetValue(userId, out int order))
+    {
+        order = Random.Shared.Next();
+        _gridOrder[userId] = order;
+    }
+    
+    return order;
+    }
+
     private void UpdateRaceSetup()
     {
         if (_raceSettings == null || Type != ServerType.Competitive || _players.Count == 0) return;
 
         _startingGrid.Value.Clear();
-        foreach (GamePlayer player in _players)
+        var racers = _players
+        .Where(player => player.State.HasNameUid)
+        .OrderBy(player => GetGridOrder(player.UserId));
+
+        foreach (GamePlayer player in racers)
         {
-            if (!player.State.HasNameUid) continue;
             _startingGrid.Value.Add(new GridPositionData(player.State.NameUid, false));
             if (player.Guest != null)
-                _startingGrid.Value.Add(new GridPositionData(player.Guest.NameUid, true));
+            _startingGrid.Value.Add(new GridPositionData(player.Guest.NameUid, true));
         }
 
         int maxAi = _aiInfo.Value.DataSet.Length;
@@ -1040,9 +1099,7 @@ public class SimServer
                 GamePlayer? target = _players.FirstOrDefault(target => target.State.NameUid == request.Target);
                 if (target != null)
                 {
-                    _raceSettings.Value.OwnerNetcodeUserId = target.UserId;
-                    Owner = target.UserId;
-                    TriggerRaceEventSync(EventUpdateReason.HostChanged);
+                    ChangeOwner(target.UserId);
                 }
                 
                 break;
@@ -1159,6 +1216,26 @@ public class SimServer
                 Broadcast((int)player.State.NameUid, NetMessageType.RankedEventVeto);
                 break;
             }
+            case NetMessageType.GameroomLeaderVeto:
+            {
+                if (Type != ServerType.Competitive || _raceSettings == null || !LeaderVetoAllowedNow(_gameroomState.Value)) break;   // <- changed
+
+                if (player.UserId == Owner || !_leaderVetoes.Add(player.UserId)) break;
+
+                Broadcast((int)player.State.NameUid, NetMessageType.GameroomLeaderVeto);
+
+                var voters = _players.Where(p => p.UserId != Owner).ToList();
+                if (voters.Count > 0 && voters.All(p => _leaderVetoes.Contains(p.UserId)))
+                {
+                    if (_gameroomState.Value.State == RoomState.CountingDown)
+                        SetCurrentGameroomState(RoomState.Ready);
+
+                    var newOwner = voters[Random.Shared.Next(voters.Count)];
+                    Logger.LogInfo<SimServer>($"Leader veto passed, host changed to {newOwner.Username}");
+                    ChangeOwner(newOwner.UserId);
+                }
+                break;
+            }
             case NetMessageType.SpectatorInfo:
             {
                 // Only the owner should be able to update the spectator info for the gameroom
@@ -1222,6 +1299,13 @@ public class SimServer
                     player.Disconnect();
                     break;
                 }
+
+                foreach (var result in results)
+                {
+                    if (result.UnknownAttributes == null) continue;
+                    foreach (var attr in result.UnknownAttributes)
+                    Logger.LogInfo<SimServer>($"Unmapped EventResult attribute from {player.Username}: {attr.Name}={attr.Value}");
+                }
                 
                 // bool isValid = true;
                 // foreach (var result in results)
@@ -1247,6 +1331,13 @@ public class SimServer
                 // }
                 
                 _eventResults.AddRange(results);
+                // Cache our own score so series standings can be calculated
+                foreach (var result in results)
+                {
+                    if (result.OwnerUid != player.State.NameUid) continue;
+                    player.HasFinishedRace = result.PercentComplete >= 1.0f;
+                    player.Score = result.EventScore;
+                }
                 player.HasSentRaceResults = true;
                 
                 break;
@@ -1437,6 +1528,12 @@ public class SimServer
 
                 // Patch our existing player state with the new message
                 player.State.Update(state);
+                // Adding logging to pick up attributes
+                if (state.UnknownAttributes != null)
+                {
+                    foreach (var attr in state.UnknownAttributes)
+                    Logger.LogInfo<SimServer>($"Unmapped PlayerState attribute from {player.Username}: {attr.Name}={attr.Value}");
+                }
                 
                 // If we're not in a gameroom, there's no GameroomReady event, so wait until we've received
                 // the player config and the second player state update to finish our "connecting" process.
@@ -1624,7 +1721,7 @@ public class SimServer
                 Rank = rank,
                 BestLapTime = result.BestEventSubScore,
                 FinishTime = result.EventScore,
-                PlaygroupSize = result.PlayerGroupId != 0 ? _eventResults.Count(match => match.PlayerGroupId == result.PlayerGroupId) : 1,
+                PlaygroupSize = IsModNation ? 0 : (result.PlayerGroupId != 0 ? _eventResults.Count(match => match.PlayerGroupId == result.PlayerGroupId) : 1),
                 Points = result.PointsScored
             });
         }
@@ -1654,19 +1751,25 @@ public class SimServer
                 break;
         }
 
+         foreach (var s in stats) // More logging to troubleshoot times not saving
+        Logger.LogInfo<SimServer>($"Race result on track {_raceSettings.Value.CreationId}: pcId={s.PlayerConnectId}, finished={s.Finished}, lap={s.BestLapTime}, finish={s.FinishTime}");
+
         BombdServer.Comms.NotifyEventFinished(_raceSettings.Value.CreationId, stats, IsModNation, gameType, IsRanked);
         
         string xml = EventResult.Serialize(_eventResults);
         _eventResults.Clear();
 
-        Logger.LogDebug<SimServer>("Finishing event with XML:\n" + xml);
+        Logger.LogDebug<SimServer>($"Finishing event on track {_raceSettings.Value.CreationId} with XML:\n" + xml);
 
         return xml;
     }
 
     private string FinalizeSeriesResults()
     {
-        var racers = _players.Where(p => !p.IsSpectator).OrderBy(p => p.Score).ToList();
+        var racers = _players.Where(p => !p.IsSpectator)
+        .OrderBy(p => p.HasFinishedRace ? 0 : 1)
+        .ThenBy(p => p.Score)
+        .ToList();
         for (int i = 0; i < racers.Count; ++i)
         {
             racers[i].Points = RaceConstants.SeriesPoints[i];
@@ -1706,6 +1809,17 @@ public class SimServer
                 SetCurrentGameroomState(RoomState.DownloadingTracks);
             else if (!hasMinPlayers)
                 SetCurrentGameroomState(RoomState.WaitingMinPlayers);
+        }
+        
+        if (IsModNation && !IsRanked && Type == ServerType.Competitive)
+        {
+            bool vetoAllowed = LeaderVetoAllowedNow(room);
+            if (room.IsLeaderVetoAvailable != vetoAllowed)
+            {
+                room.IsLeaderVetoAvailable = vetoAllowed;
+                if (!vetoAllowed) _leaderVetoes.Clear(); // I think original servers cleared this too?
+                _gameroomState.Sync();
+            }
         }
         
         switch (room.State)
@@ -1811,10 +1925,11 @@ public class SimServer
                                     _raceSettings.Value = nextEvent;
                                     Room.UpdateAttributes(nextEvent);
                                     _destination = Destination.NextSeriesRace;
-                                } else _destination = IsRanked ? Destination.KartPark : Destination.GameRoom;
+                                } 
                             }
-                            // Single xp races in ModNation just return back to the kart park
-                            else if (IsRanked) _destination = Destination.KartPark;
+                            // Single xp races here were errouneously returned to the KartPark, those lines have been removed
+                            // since standard behavior is return to the GameRoom
+                            
                             Logger.LogDebug<SimServer>($"{Room.Game.GameName} race has been completed, destination is {_destination}");
                             
                             int postRaceDelay = _raceConstants.PostRaceTime;
@@ -1883,9 +1998,36 @@ public class SimServer
                                     BroadcastPlayerState();
                                     SetCurrentGameroomState(RoomState.None);
                                 
-                                    // Reset back to the first series race
-                                    if (_seriesInfo != null && _raceSettings != null)
+                                    if (IsRanked && _raceSettings != null)
+                                    {
+                                        // Ranked rooms get a new random event (or series) for the next race,
+                                        // the same way the veto handler picks a replacement
+                                        EventSettings nextSettings;
+                                        if (_seriesInfo != null)
+                                        {
+                                            var series = Career.ModNation.GetRankedSeries(5, Owner);
+                                            _seriesInfo.Value = series;
+                                            nextSettings = series.Events.First();
+                                        }
+                                        else
+                                        {
+                                            nextSettings = Career.ModNation.GetRankedEvent(Owner, _raceSettings.Value.CreationId);
+                                        }
+
+                                        // trying to reset vetos so that they dont carry over per lobby (intended?)
+                                        foreach (var p in _players)
+                                        p.State.HasEventVetoed = false;
+                                        _gameroomState.Value.HasEventVetoOccured = false;
+                                        _gameroomState.Sync();
+
+                                        TriggerRaceEventSync(EventUpdateReason.RaceSettingsChanged, nextSettings);
+                                        Room.UpdateAttributes(nextSettings);
+                                    }
+                                    else if (_seriesInfo != null && _raceSettings != null)
+                                    {
+                                        // Unranked series (e.g. top tracks) replay from the first event
                                         _raceSettings.Value = _seriesInfo.Value.Events[0];
+                                    }
                                     
                                     // Reset the voting package
                                     if (IsKarting && Type == ServerType.Competitive)
@@ -1902,6 +2044,9 @@ public class SimServer
                                     break;
                                 case Destination.NextSeriesRace:
                                     Logger.LogDebug<SimServer>($"Starting next series event!");
+                                    // Re-roll the starting grid for every race in the series
+                                    _gridOrder.Clear();
+                                    UpdateRaceSetup();
                                     StartEvent();
                                     break;
                             }
