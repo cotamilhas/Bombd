@@ -132,7 +132,7 @@ public class EventSettings : INetworkReadable, INetworkWritable
             writer.Write(TrackName, 0x40);
             writer.Write(CreationId); // 0x40
             writer.Write(1); // - PlayerCount or something? 0x44
-            writer.Write(0); // - Unknown 0x48 used to be 1
+            writer.Write(1); // - Unknown 0x48 // not related to auto reset, could be NIS? when it was 0, no logging
             writer.Write(NumLaps); // 0x4c
             writer.Write((int)KartSpeed); // 0x50
             writer.Write((int)RaceType); // 0x54
