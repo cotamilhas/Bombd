@@ -44,6 +44,10 @@ public class SimServer
     private readonly HashSet<int> _leaderVetoes = new();
     private DateTime _lastOwnerChange = DateTime.MinValue;
     private static readonly TimeSpan LeaderVetoCooldown = TimeSpan.FromSeconds(30);
+    private int _leaderVetoesPassed;
+    private const float LeaderVetoLockSeconds = 5f;
+    private const int MaxLeaderVetoesPerRace = 3;
+    private const int MinPlayersForLeaderVeto = 3;
     
     private readonly Dictionary<int, SyncObject> _syncObjects = new();
     private int _seed = CryptoHelper.GetRandomSecret();
@@ -130,6 +134,21 @@ public class SimServer
         return !state.IsConnecting && (state.Flags & PlayerStateFlags.GameRoomReady) != 0;
     }
 
+    private bool LeaderVetoAllowedNow(GameroomState room)
+    {
+        if (!IsModNation || IsRanked || Type != ServerType.Competitive) return false;
+        if (_players.Count < MinPlayersForLeaderVeto) return false;
+        if (_leaderVetoesPassed >= MaxLeaderVetoesPerRace) return false;
+        if (DateTime.UtcNow - _lastOwnerChange < LeaderVetoCooldown) return false;
+
+        if (room.State <= RoomState.Ready) return true;
+        if (room.State == RoomState.CountingDown)
+            return room.LoadEventTime - TimeHelper.LocalTime > LeaderVetoLockSeconds;
+
+        // Never while syncing tracks, paused, or racing
+        return false;
+    }   
+
     private void ChangeOwner(int newOwner)
     {
         Owner = newOwner;
@@ -137,11 +156,11 @@ public class SimServer
         _leaderVetoes.Clear(); // votes were against the old host
         Logger.LogInfo<SimServer>($"Host changed to {newOwner}");
 
-        // Hide the leader veto for the cooldown, so hosting can't bounce back and forth
+        // Hide the leader veto for the cooldown
         if (IsModNation && !IsRanked && _gameroomState != null)
         {
-            _gameroomState.Value.IsLeaderVetoAvailable = false;
-            _gameroomState.Sync();
+        _gameroomState.Value.IsLeaderVetoAvailable = false;
+        _gameroomState.Sync();
         }
 
         if (_raceSettings == null) return;
@@ -150,9 +169,13 @@ public class SimServer
         {
             foreach (var evt in _seriesInfo.Value.Events)
                 evt.OwnerNetcodeUserId = Owner;
+            _seriesInfo.Sync();
         }
         TriggerRaceEventSync(EventUpdateReason.HostChanged);
-    }
+
+        BroadcastSessionInfo();
+        BroadcastPlayerState();
+        }
 
     private bool LeaderVetoAllowedNow(GameroomState room)
     {
@@ -423,10 +446,16 @@ public class SimServer
         var oldState = room.State;
         if (state == oldState) return;
 
-        if (IsModNation && !IsRanked && state > RoomState.Ready && state != RoomState.CountingDown)
+        if (IsModNation && !IsRanked)
         {
-            room.IsLeaderVetoAvailable = false;
-            _leaderVetoes.Clear();
+            if (state > RoomState.Ready && state != RoomState.CountingDown)
+            {
+                room.IsLeaderVetoAvailable = false;
+                _leaderVetoes.Clear();
+            }
+
+            if (state == RoomState.RaceInProgress)
+                _leaderVetoesPassed = 0;
         }
         
         Logger.LogDebug<SimServer>($"Setting GameRoomState to {state}");
@@ -1218,7 +1247,7 @@ public class SimServer
             }
             case NetMessageType.GameroomLeaderVeto:
             {
-                if (Type != ServerType.Competitive || _raceSettings == null || !LeaderVetoAllowedNow(_gameroomState.Value)) break;   // <- changed
+                if (Type != ServerType.Competitive || _raceSettings == null || !LeaderVetoAllowedNow(_gameroomState.Value)) break;
 
                 if (player.UserId == Owner || !_leaderVetoes.Add(player.UserId)) break;
 
@@ -1232,6 +1261,7 @@ public class SimServer
 
                     var newOwner = voters[Random.Shared.Next(voters.Count)];
                     Logger.LogInfo<SimServer>($"Leader veto passed, host changed to {newOwner.Username}");
+                    _leaderVetoesPassed++;
                     ChangeOwner(newOwner.UserId);
                 }
                 break;
@@ -1428,6 +1458,7 @@ public class SimServer
                 try
                 {
                     settings = EventSettings.ReadVersioned(data, Platform);
+                    Logger.LogInfo<SimServer>($"EventSettingsUpdate from {player.Username} (owner: {player.UserId == Owner}): track {settings.CreationId}");
                 }
                 catch (Exception)
                 {
@@ -1817,7 +1848,7 @@ public class SimServer
             if (room.IsLeaderVetoAvailable != vetoAllowed)
             {
                 room.IsLeaderVetoAvailable = vetoAllowed;
-                if (!vetoAllowed) _leaderVetoes.Clear(); // I think original servers cleared this too?
+                if (!vetoAllowed) _leaderVetoes.Clear();
                 _gameroomState.Sync();
             }
         }
