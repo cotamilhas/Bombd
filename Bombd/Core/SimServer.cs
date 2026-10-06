@@ -177,16 +177,6 @@ public class SimServer
         BroadcastPlayerState();
         }
 
-    private bool LeaderVetoAllowedNow(GameroomState room)
-    {
-        if (!IsModNation || IsRanked || Type != ServerType.Competitive) return false;
-        if (DateTime.UtcNow - _lastOwnerChange < LeaderVetoCooldown) return false;
-        if (room.State <= RoomState.Ready) return true;
-        if (room.State == RoomState.CountingDown)
-            return room.LoadEventTime - TimeHelper.LocalTime > _raceConstants.GameRoomTimerRacerLock;
-        return false;
-    }
-
     private void SwitchAllToRacers()
     {
         foreach (GamePlayer player in _players)
