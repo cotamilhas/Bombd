@@ -1448,7 +1448,7 @@ public class SimServer
                 try
                 {
                     settings = EventSettings.ReadVersioned(data, Platform);
-                    Logger.LogInfo<SimServer>($"EventSettingsUpdate from {player.Username} (owner: {player.UserId == Owner}): track {settings.CreationId}");
+                    Logger.LogInfo<SimServer>($"EventSettingsUpdate from {player.Username} (owner: {player.UserId == Owner}): track {settings.CreationId}, raw {Convert.ToHexString(data.ToArray())}");
                 }
                 catch (Exception)
                 {
