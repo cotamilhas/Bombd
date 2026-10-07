@@ -131,12 +131,12 @@ public class EventSettings : INetworkReadable, INetworkWritable
         {
             writer.Write(TrackName, 0x40);
             writer.Write(CreationId); // 0x40
-            writer.Write(1); // - PlayerCount or something? 0x44
-            writer.Write(0); // - Unknown 0x48 // not related to auto reset, not related to NIS
+            writer.Write(4); // - PlayerCount or something? 0x44 testing for NIS
+            writer.Write(1); // - Unknown 0x48 // not related to auto reset, not related to NIS
             writer.Write(NumLaps); // 0x4c
             writer.Write((int)KartSpeed); // 0x50
             writer.Write((int)RaceType); // 0x54
-            writer.Write(0); // - Unknown // not related to auto reset, could be NIS?
+            writer.Write(0); // - Unknown 0x58 // not related to auto reset, not related to NIS
             writer.Write(AiEnabled ? 1 : 0); // 0x5v
             writer.Write(1); // - Unknown (0x60)
             writer.Write(OwnerNetcodeUserId); // (0x64)
