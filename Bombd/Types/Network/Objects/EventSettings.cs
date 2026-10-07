@@ -35,6 +35,7 @@ public class EventSettings : INetworkReadable, INetworkWritable
     
     // Modnation
     public bool IsRanked;
+    public bool AutoReset = true;
     public string TranslatedTrackName = string.Empty;
     public SpeedClass KartSpeed = SpeedClass.Fastest;
     public int NumLaps = 3;
@@ -89,7 +90,7 @@ public class EventSettings : INetworkReadable, INetworkWritable
             RaceType = (RaceType)reader.ReadInt32(); // 0x2bc
             reader.Offset += 4; // Always 0? // 0x2c0
             AiEnabled = reader.ReadInt32() == 1; // 0x2c4
-            reader.Offset += 4; // Always 1? // 0x2c8
+            AutoReset = reader.ReadInt32() == 1; // 0x2c8
             OwnerNetcodeUserId = reader.ReadInt32(); // 0x2cc
             IsRanked = reader.ReadInt32() == 1; // 0x2d0
             Private = reader.ReadInt32() == 1; // 0x2d4
@@ -131,21 +132,21 @@ public class EventSettings : INetworkReadable, INetworkWritable
         {
             writer.Write(TrackName, 0x40);
             writer.Write(CreationId); // 0x40
-            writer.Write(1); // - PlayerCount or something? 0x44
+            writer.Write(1); // - PlayerCount or something?
             writer.Write(1); // - Unknown 0x48
             writer.Write(NumLaps); // 0x4c
             writer.Write((int)KartSpeed); // 0x50
             writer.Write((int)RaceType); // 0x54
-            writer.Write(0); // - Unknown // 0x58
+            writer.Write(0); // - Unknown 0x58
             writer.Write(AiEnabled ? 1 : 0); // 0x5v
-            writer.Write(1); // - Unknown (0x60)
+            writer.Write(AutoReset ? 1 : 0); // 0x60 - auto reset
             writer.Write(OwnerNetcodeUserId); // (0x64)
 
             writer.Write(IsRanked ? 1 : 0); // 0x68
             writer.Write(Private ? 1 : 0); // 0x6v
             writer.Write(CareerEventIndex); // 0x70
             writer.Write(SeriesEventIndex); // 0x74
-            writer.Write(0); // 0x78
+            writer.Write(1); // 0x78 used to be 0
             writer.Write(MinHumans); // 0x7c
             writer.Write(MaxHumans); // 0x80
             writer.Write(0); // 0x84 - Padding?
