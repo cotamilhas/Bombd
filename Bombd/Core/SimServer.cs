@@ -1233,11 +1233,13 @@ public class SimServer
             case NetMessageType.GameroomStopTimer:
             {
                 if (player.UserId != Owner || Type != ServerType.Competitive) break;
-                
                 // Make sure we're still within the threshold of being able to stop the timer
                 var room = _gameroomState.Value;
                 float timeRemaining = (room.LoadEventTime - TimeHelper.LocalTime);
-                if (timeRemaining > _raceConstants.GameRoomTimerRacerLock)
+
+                Logger.LogInfo<SimServer>($"GameroomStopTimer from {player.Username} (host: {player.UserId == Owner}): {timeRemaining}s left, state {room.State}");
+
+                if (timeRemaining > _raceConstants.GameRoomTimerLock)
                 {
                     SetCurrentGameroomState(RoomState.Ready);
                 }
