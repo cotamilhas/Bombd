@@ -382,8 +382,15 @@ public class SimServer
         BroadcastSessionInfo();
     }
 
-    private void BroadcastPlayerState()
+    private bool _playerStateDirty;
+
+    // Trying to send updates in one big burst instead
+    private void BroadcastPlayerState() => _playerStateDirty = true;
+
+    private void FlushPlayerState()
     {
+        if (!_playerStateDirty) return;
+        _playerStateDirty = false;
         Broadcast(new NetMessagePlayerUpdate(Platform) { Data = _playerStates }, NetMessageType.BulkPlayerStateUpdate);
     }
     
@@ -2073,7 +2080,8 @@ public class SimServer
                         foreach (ItemNode item in _arbitrationServer.Items)
                             block.ItemIds.Add(item.Uid);
                         _arbitrationServer.Items.Clear();
-                        Broadcast(block, NetMessageType.ArbitratedItemDestroyBlock);
+                        if (block.ItemIds.Count > 0) // prevents spamming every tick to destroy items that are no longer there
+                            Broadcast(block, NetMessageType.ArbitratedItemDestroyBlock);
                         
                         // After the race has officially ended, reset the gameroom state
                         if (TimeHelper.LocalTime >= _raceStateEndTime)
@@ -2183,5 +2191,6 @@ public class SimServer
         _arbitrationServer.Update();
         if (Type == ServerType.Competitive)
             SimUpdate();
+        FlushPlayerState();
     }
 }
