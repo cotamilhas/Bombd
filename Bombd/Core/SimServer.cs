@@ -1237,7 +1237,7 @@ public class SimServer
                 var room = _gameroomState.Value;
                 float timeRemaining = (room.LoadEventTime - TimeHelper.LocalTime);
 
-                Logger.LogInfo<SimServer>($"GameroomStopTimer from {player.Username} (host: {player.UserId == Owner}): {timeRemaining}s left, state {room.State}");
+                Logger.LogDebug<SimServer>($"GameroomStopTimer from {player.Username} (host: {player.UserId == Owner}): {timeRemaining}s left, state {room.State}");
 
                 if (timeRemaining > _raceConstants.GameRoomTimerLock)
                 {
