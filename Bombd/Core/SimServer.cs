@@ -938,6 +938,9 @@ public class SimServer
                 
                 // ItemHitConfirm gets sent by the player that's being hit, so
                 // we don't have to verify that message.
+
+                if (type is NetMessageType.ItemHitPlayer or NetMessageType.ItemHitConfirm)
+                    Logger.LogInfo<SimServer>($"{type} from {player.Username} at {TimeHelper.LocalTime}: {Convert.ToHexString(data)}"); // send item hit raw data to try and see what it does
                 
                 Broadcast(data, type, player);
                 break;
