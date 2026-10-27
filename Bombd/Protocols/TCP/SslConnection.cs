@@ -14,8 +14,8 @@ public class SslConnection : ConnectionBase
 {
     private const int MaxMessageSize = 8192;
     private const int KeepAliveFrequency = 3000;
-    private const int ReadTimeout = 10_000;
-    private const int WriteTimeout = 10_000;
+    private const int ReadTimeout = 30_000;
+    private const int WriteTimeout = 30_000;
 
     // u32 MsgLength
     // char Md5Digest[16]
